@@ -633,3 +633,4 @@ stargazer(model, academic_model_full,
           digits = 3)
 
 ```
+
