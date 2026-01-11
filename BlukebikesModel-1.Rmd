@@ -1,0 +1,635 @@
+---
+title: "Data200FinalProjectDataCleaning"
+output: html_notebook
+---
+
+ 
+```{r}
+
+  
+library(readr)
+Bluebikes_2024_AllMonths <- read_csv("Bluebike_yearlydata/Bluebikes_2024_AllMonths4Mill.csv")
+View(Bluebikes_2024_AllMonths)
+
+#Bluebikes_2024_AcademicMonths <- read_csv("Bluebike_yearlydata/Bluebikes_2024_AcademicMonths.csv")
+#View(Bluebikes_2024_AcademicMonths) 
+
+FinalCollegesandUniversities <- read_csv("UniversityData/FinalCollegesandUniversities.csv")
+View(FinalCollegesandUniversities) 
+
+BostonTStops <- read_csv("BostonTrainData/BostonT.csv")
+View(BostonTStops) 
+```
+
+```{r}
+#Here is where we still start cleaning 
+library(dplyr)
+
+glimpse(Bluebikes_2024_AllMonths)
+
+glimpse(FinalCollegesandUniversities)
+
+```
+```{r}
+summary(Bluebikes_2024_AllMonths)
+
+library(dplyr)
+library(tidyr)
+
+#Now cleaning 
+Bluebikes_2024_AllMonths <- Bluebikes_2024_AllMonths %>%
+  select( -member_casual, -rideable_type) 
+
+#dropping NAs
+Bluebikes_2024_AllMonths <- Bluebikes_2024_AllMonths %>%
+  drop_na(end_lat, end_lng)
+
+summary(Bluebikes_2024_AllMonths)
+
+
+```
+
+
+
+
+
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+```
+
+```{r}
+summary(FinalCollegesandUniversities)
+
+
+FinalCollegesandUniversities <- FinalCollegesandUniversities %>%
+  select(
+    -PLUS_FOUR,
+    -URL,
+    -AWARDSOFFR,
+    -DEGREEOFFR,
+    -MAIN_TEL,
+    -NCES_TYPE,
+    -LARGEPROG,
+    -L_SRC
+  )
+
+FinalCollegesandUniversities$SchoolType_binary <- ifelse(
+  FinalCollegesandUniversities$TYPE == "PRI", 1, 0
+)
+
+library(tidyr)
+library(dplyr)
+
+FinalCollegesandUniversities <- FinalCollegesandUniversities %>%
+  unite(
+    col = "University_Name", 
+    COLLEGE, CAMPUS,       
+    sep = ":"              
+  )
+
+
+summary(FinalCollegesandUniversities)
+
+```
+
+
+```{r}
+summary(BostonTStops)
+BostonTStops <- BostonTStops %>%
+  select(
+    -TERMINUS,       
+    -ROUTE,
+    -LINE
+  )
+```
+
+```{r}
+
+library(sf)
+library(dplyr) 
+
+
+```
+
+```{r}
+# Convert Universities DF to an SF object 
+# Coordinates are in LATITUDE/LONGITUDE columns (EPSG 4326)
+CollegesandUniversities_SF <- st_as_sf(FinalCollegesandUniversities, 
+                            coords = c("Long", "Lat"), 
+                            crs = 4326) %>%
+  # Transform to a local projected CRS (Massachusetts State Plane) for accurate distance calc
+  st_transform(crs = 2249)
+
+# Convert BlueBike Trips DF to an SF object (assuming common BlueBike column names)
+bluebike_trips_sf <- st_as_sf(Bluebikes_2024_AllMonths, 
+                              coords = c("start_lng", "start_lat"), 
+                              crs = 4326) %>%
+  # Transform to the same CRS as the universities
+  st_transform(crs = 2249)
+
+```
+
+
+```{r}
+
+# Find the index of the nearest university for each trip
+nearest_university_index <- st_nearest_feature(bluebike_trips_sf, CollegesandUniversities_SF)
+
+# Add the university information back to the trips data frame
+# This creates the 'University_Name' column needed for the aggregation step
+bluebike_trips_joined <- bluebike_trips_sf %>%
+  mutate(
+    University_Name = CollegesandUniversities_SF$University_Name[nearest_university_index],
+    # Convert back to a standard data frame for easier aggregation/regression later
+    # and drop the 'geometry' column if needed
+    geometry = NULL
+  ) %>%
+  as.data.frame()
+
+```
+
+
+
+```{r}
+library(dplyr)
+
+rides_per_university_month <- bluebike_trips_joined %>%
+  # Create a 'year_month' grouping column by extracting the first 7 characters (YYYY-MM)
+  mutate(
+    year_month = substr(date, 1, 7)
+    # Example: "2024-01-31" becomes "2024-01"
+  ) %>%
+  # Group the data by university name and the new month string, then count rides
+  group_by(University_Name, year_month) %>%
+  summarise(
+    total_rides = n(),
+    .groups = 'drop'
+  )
+```
+
+
+```{r}
+summary(BostonTStops)
+```
+
+```{r}
+colnames(BostonTStops)
+
+str(BostonTStops$Lat)
+str(BostonTStops$Long)
+
+library(sf)
+
+# Create sf object from T stops
+T_stops_sf <- st_as_sf(
+  BostonTStops,
+  coords = c("Long", "Lat"),  # x = longitude, y = latitude
+  crs = 4326
+)
+
+# Transform CRS to matc universities dataset
+T_stops_sf <- st_transform(T_stops_sf, crs = 2249)
+
+
+```
+
+```{r}
+
+# Find the index of the nearest T stop for each university
+nearest_t_stop_index <- st_nearest_feature(CollegesandUniversities_SF, T_stops_sf)
+
+# Calculate the distance from each university to its nearest T stop (in meters)
+distances_to_t_stop_meters <- st_distance(CollegesandUniversities_SF, T_stops_sf[nearest_t_stop_index,], by_element = TRUE)
+
+# Convert to a numeric vector and convert meters to miles
+distances_to_t_stop_miles <- as.numeric(distances_to_t_stop_meters) * 0.000621371 
+
+# Add this new distance column to main university data frame
+FinalCollegesandUniversities$Distance_to_TStop_miles <- distances_to_t_stop_miles
+
+
+```
+
+
+```{r}
+
+final_analysis_data <- left_join(
+  rides_per_university_month, 
+  FinalCollegesandUniversities, 
+  by = "University_Name" 
+)
+
+# Verify the result
+head(final_analysis_data)
+
+```
+
+
+```{r}
+summary(final_analysis_data)
+
+library(dplyr) 
+glimpse(final_analysis_data)
+
+```
+
+```{r}
+library(dplyr)
+
+average_rides_per_university <- final_analysis_data %>% 
+  group_by(University_Name) %>%
+  summarise(
+    avg_monthly_rides = mean(total_rides, na.rm = TRUE), #
+    .groups = 'drop'
+  )
+
+# This will have one row per university
+print(average_rides_per_university)
+
+```
+
+```{r}
+final_regression_data <- left_join(
+  average_rides_per_university, 
+  FinalCollegesandUniversities, 
+  by = "University_Name"
+)
+
+glimpse(final_regression_data)
+
+```
+
+```{r}
+# Code ran previously to get distance values (distances_miles and distances_to_t_stop_miles) 
+
+# Extract unique station locations (using start station info as a proxy)
+unique_stations_sf <- bluebike_trips_sf %>%
+  group_by(start_station_id) %>% slice(1) %>% ungroup()
+
+# Find nearest station index and calculate distance (in miles)
+nearest_station_index <- st_nearest_feature(CollegesandUniversities_SF, unique_stations_sf)
+distances_meters <- st_distance(CollegesandUniversities_SF, unique_stations_sf[nearest_station_index,], by_element = TRUE)
+distances_miles <- as.numeric(distances_meters) * 0.000621371 
+
+# Find nearest T stop index and calculate distance (in miles)
+nearest_t_stop_index <- st_nearest_feature(CollegesandUniversities_SF, T_stops_sf)
+distances_to_t_stop_meters <- st_distance(CollegesandUniversities_SF, T_stops_sf[nearest_t_stop_index,], by_element = TRUE)
+distances_to_t_stop_miles <- as.numeric(distances_to_t_stop_meters) * 0.000621371 
+
+
+
+# This adds the column to the 1-row-per-university data frame
+FinalCollegesandUniversities$Distance_to_BlueBikeStation_miles <- distances_miles
+FinalCollegesandUniversities$Distance_to_TStop_miles <- distances_to_t_stop_miles
+
+```
+
+```{r}
+# Merge the average ridership with the characteristics data
+final_regression_data <- left_join(
+  average_rides_per_university, 
+  FinalCollegesandUniversities, 
+  by = "University_Name"
+)
+
+glimpse(final_regression_data)
+
+```
+```{r}
+# Run the linear model
+model <- lm(
+  avg_monthly_rides ~ Student_Population + Distance_to_BlueBikeStation_miles + Distance_to_TStop_miles + CITY + TYPE + CATEGORY, 
+  data = final_regression_data
+)
+
+# View the results of the model
+summary(model)
+
+```
+```{r}
+# The simplified linear model focusing only on core numerical predictors
+simplified_model <- lm(
+  avg_monthly_rides ~ Student_Population + Distance_to_BlueBikeStation_miles + Distance_to_TStop_miles, 
+  data = final_regression_data
+)
+
+# View the results of the simplified model
+summary(simplified_model)
+
+```
+
+```{r}
+
+
+library(dplyr)
+
+# Define the months we want to keep (e.g., 06, 07, 08, 09)
+peak_months_data <- final_analysis_data %>%
+  filter(substr(year_month, 6, 7) %in% c("06", "07", "08", "09"))
+
+
+average_rides_peak_season <- peak_months_data %>%
+  group_by(University_Name) %>%
+  summarise(
+    avg_monthly_rides_peak = mean(total_rides, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+final_regression_data_peak <- left_join(
+  average_rides_peak_season,
+  FinalCollegesandUniversities,
+  by = "University_Name"
+)
+
+peak_model <- lm(
+  avg_monthly_rides_peak ~ Student_Population + Distance_to_BlueBikeStation_miles + Distance_to_TStop_miles,
+  data = final_regression_data_peak
+)
+
+summary(peak_model)
+
+
+```
+```{r}
+
+```
+
+```{r}
+#Lets visualize what is happening. 
+
+summary(Bluebikes_2024_AllMonths)
+
+
+library(dplyr)
+library(ggplot2)
+
+daily_rides <- Bluebikes_2024_AllMonths %>%
+  group_by(date) %>%
+  summarise(
+    total_daily_rides = n(),
+    .groups = 'drop'
+  )
+
+ggplot(daily_rides, aes(x = date, y = total_daily_rides)) +
+  geom_line(color = "steelblue") +
+  labs(
+    title = "Total Daily Bluebikes Rides in Boston (2024)",
+    x = "Date",
+    y = "Total Rides"
+  ) +
+  theme_minimal()
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2) # Make sure ggplot2 is loaded
+
+station_trips_summary <- Bluebikes_2024_AllMonths %>%
+  group_by(start_station_id, start_station_name) %>%
+  summarise(
+    total_start_trips = n(),
+    .groups = 'drop'
+  ) %>%
+  # Sort the stations in descending order of trip count for a more useful chart
+  arrange(desc(total_start_trips))
+
+
+ggplot(station_trips_summary, aes(x = reorder(start_station_name, -total_start_trips), y = total_start_trips)) +
+  geom_col(fill = "steelblue") + 
+  labs(
+    title = "Total Bluebikes Trips Started Per Station (2024)",
+    x = "Station Name",
+    y = "Total Number of Trips Started"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+#top 20 
+
+library(dplyr)
+library(ggplot2)
+
+# Create the summary table
+top_20_stations <- Bluebikes_2024_AllMonths %>%
+  group_by(start_station_id, start_station_name) %>%
+  summarise(
+    total_start_trips = n(),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(total_start_trips)) %>%
+  slice_head(n = 20)
+
+# Plot (using coord_flip to avoid label overlap & reorder issues)
+ggplot(top_20_stations, aes(x = start_station_name, y = total_start_trips)) +
+  geom_col(fill = "dodgerblue4") +
+  coord_flip() +   # <— This avoids reorder() problems so bars ALWAYS show
+  labs(
+    title = "Top 20 Most Used Bluebikes Start Stations (2024)",
+    x = "Station Name",
+    y = "Total Number of Trips Started"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8))
+
+```
+
+
+```{r}
+#bottom 20 stations
+library(dplyr)
+library(ggplot2)
+
+bottom_20_stations <- Bluebikes_2024_AllMonths %>%
+  group_by(start_station_id, start_station_name) %>%
+  summarise(
+    total_start_trips = n(),
+    .groups = 'drop'
+  ) %>%
+  # Sort in ascending order (smallest trips first)
+  arrange(total_start_trips) %>%
+  # Select only the top 20 rows (which are now the ones with the fewest trips)
+  slice_head(n = 20)
+
+ggplot(bottom_20_stations, aes(x = reorder(start_station_name, total_start_trips), y = total_start_trips)) +
+  geom_col(fill = "dodgerblue4") +
+  labs(
+    title = "Bottom 20 Least Used Bluebikes Start Stations (2024)",
+    x = "Station Name",
+    y = "Total Number of Trips Started"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1, vjust = 1))
+```
+
+```{r}
+academic_months_data <- final_analysis_data %>%
+  filter(substr(year_month, 6, 7) %in% c("01","02","03","04","09","10","11","12"))
+average_rides_academic_season <- academic_months_data %>%
+  group_by(University_Name) %>%
+  summarise(
+    avg_monthly_rides_academic = mean(total_rides, na.rm = TRUE),
+    .groups = 'drop'
+  )
+final_regression_data_academic <- left_join(
+  average_rides_academic_season,
+  FinalCollegesandUniversities,
+  by = "University_Name"
+)
+academic_model <- lm(
+  avg_monthly_rides_academic ~ Student_Population +
+    Distance_to_BlueBikeStation_miles +
+    Distance_to_TStop_miles,
+  data = final_regression_data_academic
+)
+
+summary(academic_model)
+academic_model_full <- lm(
+  avg_monthly_rides_academic ~ 
+    Student_Population +
+    Distance_to_BlueBikeStation_miles +
+    Distance_to_TStop_miles +
+    CITY +
+    TYPE +
+    CATEGORY,
+  data = final_regression_data_academic
+)
+
+summary(academic_model_full)
+
+academic_data_pred <- final_regression_data %>%
+  mutate(predicted = predict(academic_model))
+
+
+ggplot(academic_data_pred, aes(x = avg_monthly_rides, y = predicted)) +
+  geom_point(color = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "darkred") +
+  labs(
+    title = "Actual vs Predicted Rides (Academic Months)",
+    x = "Actual Rides",
+    y = "Predicted Rides"
+  ) +
+  theme_minimal()
+
+#data points are scattered, model isnt good at predicting line
+```
+```{r}
+library(broom)
+library(ggplot2)
+
+coef_df <- tidy(peak_model) %>%
+  filter(term != "(Intercept)")
+
+ggplot(coef_df, aes(x = estimate, y = reorder(term, estimate))) +
+  geom_point(color = "firebrick") +
+  geom_errorbarh(aes(xmin = estimate - std.error*1.96,
+                     xmax = estimate + std.error*1.96),
+                 height = 0.2,
+                 color = "gray40") +
+  labs(
+    title = "Coefficient Plot for Full Model",
+    x = "Coefficient Estimate (± 95% CI)",
+    y = ""
+  ) +
+  theme_minimal()
+
+#CI line passing 0 means none of these predictors are meaninful
+```
+
+
+```{r}
+ggplot(final_regression_data, aes(x = Student_Population, y = avg_monthly_rides)) +
+  geom_point(color = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "darkred") +
+  labs(
+    title = "Student Population vs Average Monthly Bluebike Rides",
+    x = "Student Population",
+    y = "Avg Monthly Rides"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+academic_model_full <- lm(
+  avg_monthly_rides_academic ~ 
+  Student_Population + 
+  Distance_to_BlueBikeStation_miles + 
+  Distance_to_TStop_miles + 
+  CITY + 
+  TYPE + 
+  CATEGORY,
+  data = final_regression_data_academic
+)
+summary(academic_model_full)
+```
+```{r}
+library(dplyr)
+
+library(dplyr)
+library(tidyr)
+
+model1_summary <- final_regression_data %>%
+  select(avg_monthly_rides, Student_Population,
+         Distance_to_BlueBikeStation_miles,
+         Distance_to_TStop_miles) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    SD   = sd(Value, na.rm = TRUE),
+    Min  = min(Value, na.rm = TRUE),
+    Max  = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+model1_summary
+
+
+```
+```{r}
+model2_summary <- final_regression_data_academic %>%
+  select(avg_monthly_rides_academic, Student_Population,
+         Distance_to_BlueBikeStation_miles,
+         Distance_to_TStop_miles) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    SD   = sd(Value, na.rm = TRUE),
+    Min  = min(Value, na.rm = TRUE),
+    Max  = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+model2_summary
+```
+
+
+```{r}
+write.csv(model1_summary, "model1_summary.csv", row.names = FALSE)
+write.csv(model2_summary, "model2_summary.csv", row.names = FALSE)
+```
+
+
+```{r}
+install.packages("stargazer")
+library(stargazer)
+
+stargazer(model, academic_model_full,
+          type = "html",
+          out = "Bluebikes_Regression_Models.html",
+          title = "Bluebikes Regression Models",
+          dep.var.labels = c("All Months", "Academic Months"),
+          covariate.labels = c("Student Population",
+                               "Distance to Bike Station (mi)",
+                               "Distance to T Stop (mi)"),
+          omit = c("CITY", "TYPE", "CATEGORY"),
+          omit.labels = c("City Fixed Effects", "School Type", "Category"),
+          digits = 3)
+
+```
